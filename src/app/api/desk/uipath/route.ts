@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { engine } from "@/lib/desk/engine";
+import { webhookSecretIsValid } from "@/lib/security";
 
 export const dynamic = "force-dynamic";
 
 function signatureIsValid(signature: string | null) {
-  const secret = process.env.UIPATH_WEBHOOK_SECRET;
-  if (!secret) return true;
-  return signature === secret;
+  return webhookSecretIsValid(signature, process.env.UIPATH_WEBHOOK_SECRET);
 }
 
 export async function POST(req: NextRequest) {
