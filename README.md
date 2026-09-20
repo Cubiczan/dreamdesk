@@ -202,6 +202,18 @@ prisma/schema.prisma              # 7 models — the audit trail's source of tru
   `src/lib/desk/council.ts` `conveneCouncil`). Quorum stays structural —
   weights tilt conviction, never vote counts — and with no settled history the
   weights are neutral 1.0, so calibration only shifts behavior once outcomes
+  exist.
+  Edge-gate interaction (explicit, per review): calibrated weights reach
+  `modelProb` — the input compared against the venue price at the
+  deterministic 8-cent edge gate — through `weightedNetConviction`
+  (`src/lib/desk/council.ts`; the net-conviction call site and `modelProb`
+  construction sit at lines 172-183 at this writing). Under the [0.6, 1.4]
+  bound the shift is bounded: a max-spread 2v1 split moves `modelProb` by
+  about 4 cents (exactly 0.04 on the pinned prelint vector — TREND 1.4 YES /
+  SENTINEL 1.0 YES / CONTRARIAN 0.6 NO at 0.8 confidence — and below a
+  nickel in the worst case; both asserted in `tests/calibration.test.ts`).
+  That means in max-spread 2v1 splits calibration can push a previously
+  sub-threshold edge past the 8-cent gate — by design once settled outcomes
   exist. Reopening condition (matrix): outcomes rare, slow, or subjective.
 - **Row 11 (on-chain identity + off-chain blob state) — reversed.** DreamDesk
   executes on Somnia testnet, not Sui; the Walrus SDK state-pointer port is

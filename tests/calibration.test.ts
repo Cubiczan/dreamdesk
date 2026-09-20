@@ -9,6 +9,7 @@ import {
   weightsFromShares,
   type ScoredBallot,
 } from "@/lib/desk/calibration";
+import { weightedNetConviction, type JurorBallot } from "@/lib/desk/council";
 
 describe("impliedProbForUp", () => {
   it("maps YES to confidence and NO to its complement", () => {
@@ -95,5 +96,47 @@ describe("weightsFromShares + computeJurorWeights", () => {
     expect(weights.CONTRARIAN!).toBeLessThan(weights.TREND!);
     expect(weights.CONTRARIAN!).toBeLessThan(1);
     expect(weights.TREND!).toBeGreaterThan(1);
+  });
+});
+
+describe("weightedNetConviction + the 8-cent edge gate", () => {
+  // Prelint's 2v1 vector: max weight spread (TREND 1.4, CONTRARIAN 0.6,
+  // SENTINEL neutral) on a 2v1 YES split at 0.8 confidence. Calibration
+  // flows through netConviction into modelProb — the edge-gate input — so
+  // this pins the exact bounded shift the README documents.
+  const ballots: JurorBallot[] = [
+    { juror: "TREND", vote: "YES", confidence: 0.8, rationale: "", engine: "heuristic" },
+    { juror: "SENTINEL", vote: "YES", confidence: 0.8, rationale: "", engine: "heuristic" },
+    { juror: "CONTRARIAN", vote: "NO", confidence: 0.8, rationale: "", engine: "heuristic" },
+  ];
+
+  it("shifts modelProb by exactly 4 cents on prelint's 2v1 vector", () => {
+    const uncalibrated = weightedNetConviction(ballots);
+    const calibrated = weightedNetConviction(ballots, { TREND: 1.4, SENTINEL: 1.0, CONTRARIAN: 0.6 });
+    expect(uncalibrated).toBeCloseTo(1 / 3, 10);
+    expect(calibrated).toBeCloseTo(0.6, 10);
+    // modelProb = mid + conviction * 0.15 → shift = (0.6 − 1/3) * 0.15 = 0.04
+    expect((calibrated - uncalibrated) * 0.15).toBeCloseTo(0.04, 10);
+  });
+
+  it("bounds the worst-case shift under the [0.6, 1.4] band below a nickel", () => {
+    const uncalibrated = weightedNetConviction(ballots);
+    const maxSpread = weightedNetConviction(ballots, { TREND: 1.4, SENTINEL: 1.4, CONTRARIAN: 0.6 });
+    expect((maxSpread - uncalibrated) * 0.15).toBeLessThan(0.05);
+  });
+
+  it("weights tilt conviction without touching vote counts (quorum stays structural)", () => {
+    // 1 YES vs 2 NO: maximum YES-side weight can tilt the weighted
+    // conviction positive — but the decision gate in conveneCouncil also
+    // requires 2 YES votes, so the outcome still stays SPLIT. Weights
+    // never change vote counts.
+    const minority: JurorBallot[] = [
+      { juror: "TREND", vote: "YES", confidence: 0.9, rationale: "", engine: "heuristic" },
+      { juror: "SENTINEL", vote: "NO", confidence: 0.8, rationale: "", engine: "heuristic" },
+      { juror: "CONTRARIAN", vote: "NO", confidence: 0.8, rationale: "", engine: "heuristic" },
+    ];
+    expect(weightedNetConviction(minority, { TREND: 1.4, SENTINEL: 0.6, CONTRARIAN: 0.6 })).toBeGreaterThan(0);
+    // Quorum gate: yesCount is 1 < 2 → SPLIT regardless of conviction.
+    expect(minority.filter((b) => b.vote === "YES").length).toBe(1);
   });
 });
