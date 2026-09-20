@@ -190,3 +190,23 @@ prisma/schema.prisma              # 7 models — the audit trail's source of tru
 ## Team
 
 [@icohangar-ops](https://github.com/icohangar-ops) · [@Cubiczan](https://github.com/Cubiczan)
+
+## Propagation notes (wave B)
+
+- **Row 4 (calibration feedback loop) — adopted.** `src/lib/desk/calibration.ts`
+  implements per-juror Brier scoring against settled trade outcomes: each
+  ballot's confidence is read as the juror's implied probability of the UP
+  outcome (`impliedProbForUp`), scored against the persisted `settleProb` of
+  the trade that decision opened, and softmax'd into per-juror weights bounded
+  to [0.6, 1.4] (`src/lib/desk/engine.ts` `loadJurorWeights`, applied in
+  `src/lib/desk/council.ts` `conveneCouncil`). Quorum stays structural —
+  weights tilt conviction, never vote counts — and with no settled history the
+  weights are neutral 1.0, so calibration only shifts behavior once outcomes
+  exist. Reopening condition (matrix): outcomes rare, slow, or subjective.
+- **Row 11 (on-chain identity + off-chain blob state) — reversed.** DreamDesk
+  executes on Somnia testnet, not Sui; the Walrus SDK state-pointer port is
+  heavy for a non-Sui stack. The reversal condition also fires: audits are
+  already verifiable per decision through the hash-chained CHP ledger and
+  persisted `CouncilVote`/`Trade` records, so a session-level blob pointer
+  would trade per-event verifiability for cost. Reopens if the desk migrates
+  to a Sui-family venue or gains permanent-storage sealing.
