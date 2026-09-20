@@ -7,6 +7,7 @@
 
 import { type SignalPacket } from "./agents";
 import { startActiveObservation } from "@langfuse/tracing";
+import type { JurorWeights } from "./calibration";
 
 export type JurorName = "TREND" | "CONTRARIAN" | "SENTINEL";
 export type Vote = "YES" | "NO" | "ABSTAIN"; // YES = buy the Up contract
@@ -145,7 +146,7 @@ async function voteJuror(juror: JurorName, ctx: CouncilContext): Promise<JurorBa
   }
 }
 
-export async function conveneCouncil(ctx: CouncilContext): Promise<CouncilOutcome> {
+export async function conveneCouncil(ctx: CouncilContext, weights?: JurorWeights): Promise<CouncilOutcome> {
   return await startActiveObservation("desk-council", async (span) => {
     span.update({ input: { asset: ctx.asset, cadenceSec: ctx.cadenceSec, marketSymbol: ctx.marketSymbol } });
 
@@ -155,8 +156,8 @@ export async function conveneCouncil(ctx: CouncilContext): Promise<CouncilOutcom
       voteJuror("SENTINEL", ctx),
     ]);
 
-    const yesWeight = ballots.filter((b) => b.vote === "YES").reduce((a, b) => a + b.confidence, 0);
-    const noWeight = ballots.filter((b) => b.vote === "NO").reduce((a, b) => a + b.confidence, 0);
+    const yesWeight = ballots.filter((b) => b.vote === "YES").reduce((a, b) => a + b.confidence * (weights?.[b.juror] ?? 1), 0);
+    const noWeight = ballots.filter((b) => b.vote === "NO").reduce((a, b) => a + b.confidence * (weights?.[b.juror] ?? 1), 0);
     const total = yesWeight + noWeight;
 
     let consensus: CouncilOutcome["consensus"] = "SPLIT";
