@@ -12,7 +12,7 @@ import { DESK, CHP, DREAMDEX, chpLedgerPath, chpRequireHumanLock, resolveMode, t
 import { prices } from "./prices";
 import { momentumAgent, volatilityAgent, sentimentAgent, type SignalPacket, type AgentName } from "./agents";
 import { conveneCouncil, type JurorBallot, type CouncilContext, type CouncilOutcome, type JurorName } from "./council";
-import { computeJurorWeights, impliedProbForUp, type JurorWeights, type ScoredBallot } from "./calibration";
+import { buildScoredBallots, computeJurorWeights, type JurorWeights } from "./calibration";
 import { runRiskGates, type RiskGate } from "./risk";
 import {
   runChpTradeGate,
@@ -312,7 +312,7 @@ class DeskEngine extends EventEmitter {
         },
       });
       for (const b of outcome.ballots) {
-        await db.councilVote.create({ data: { sessionId: this.sessionId!, decisionId: decision.id, juror: b.juror, vote: b.vote, confidence: b.confidence, rationale: b.rationale } });
+        await db.councilVote.create({ data: { sessionId: this.sessionId!, decisionId: decision.id, juror: b.juror, vote: b.vote, confidence: b.confidence, rationale: b.rationale, engine: b.engine } });
         await this.audit("VOTE", "COUNCIL", { juror: b.juror, vote: b.vote, confidence: Number(b.confidence.toFixed(2)), engine: b.engine, rationale: b.rationale });
       }
       await this.audit("CONSENSUS", "COUNCIL", { consensus: outcome.consensus, modelProb: Number(outcome.modelProb.toFixed(3)), summary: outcome.summary });
@@ -530,7 +530,7 @@ class DeskEngine extends EventEmitter {
     const decisionIds = settled.map((t) => t.decisionId as string);
     const votes = await db.councilVote.findMany({
       where: { decisionId: { in: decisionIds } },
-      select: { decisionId: true, juror: true, vote: true, confidence: true },
+      select: { decisionId: true, juror: true, vote: true, confidence: true, engine: true },
     });
 
     const outcomeUpByDecision = new Map<string, number>();
@@ -538,18 +538,7 @@ class DeskEngine extends EventEmitter {
       const up = t.side === "YES" ? (t.settleProb as number) : 1 - (t.settleProb as number);
       outcomeUpByDecision.set(t.decisionId as string, up);
     }
-    const jurors: JurorName[] = ["TREND", "CONTRARIAN", "SENTINEL"];
-    const records: ScoredBallot[] = [];
-    for (const v of votes) {
-      const outcomeUp = outcomeUpByDecision.get(v.decisionId);
-      if (outcomeUp == null) continue;
-      const juror = jurors.find((j) => j === v.juror);
-      if (!juror) continue;
-      const impliedProbUp = impliedProbForUp(v.vote as "YES" | "NO" | "ABSTAIN", v.confidence);
-      if (impliedProbUp == null) continue;
-      records.push({ juror, impliedProbUp, outcomeUp });
-    }
-    return computeJurorWeights(records);
+    return computeJurorWeights(buildScoredBallots(votes, outcomeUpByDecision));
   }
 
   private async settleExpired() {

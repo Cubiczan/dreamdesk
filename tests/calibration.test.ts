@@ -2,8 +2,10 @@
 import { describe, expect, it } from "vitest";
 import {
   brier,
+  buildScoredBallots,
   computeJurorWeights,
   impliedProbForUp,
+  isScoreableEngine,
   jurorMeanBrier,
   softmaxShares,
   weightsFromShares,
@@ -138,5 +140,37 @@ describe("weightedNetConviction + the 8-cent edge gate", () => {
     expect(weightedNetConviction(minority, { TREND: 1.4, SENTINEL: 0.6, CONTRARIAN: 0.6 })).toBeGreaterThan(0);
     // Quorum gate: yesCount is 1 < 2 → SPLIT regardless of conviction.
     expect(minority.filter((b) => b.vote === "YES").length).toBe(1);
+  });
+});
+
+describe("ballot engine provenance (only genuine LLM ballots score)", () => {
+  it("isScoreableEngine accepts only the llm label (null fails closed)", () => {
+    expect(isScoreableEngine("llm")).toBe(true);
+    expect(isScoreableEngine("heuristic")).toBe(false);
+    expect(isScoreableEngine(null)).toBe(false); // pre-label rows: excluded
+    expect(isScoreableEngine(undefined)).toBe(false);
+  });
+
+  it("buildScoredBallots drops heuristic and null-engine ballots from scoring input", () => {
+    const outcomeUpByDecision = new Map([["d1", 1], ["d2", 0]]);
+    const votes = [
+      { decisionId: "d1", juror: "TREND", vote: "YES", confidence: 0.8, engine: "llm" },
+      { decisionId: "d1", juror: "SENTINEL", vote: "YES", confidence: 0.8, engine: "heuristic" },
+      { decisionId: "d2", juror: "CONTRARIAN", vote: "NO", confidence: 0.7, engine: null },
+    ];
+    const records = buildScoredBallots(votes, outcomeUpByDecision);
+    // Only the genuine LLM ballot survives: 40% of the paper run's votes were
+    // heuristic fallbacks — scoring them would corrupt the Brier signal.
+    expect(records).toHaveLength(1);
+    expect(records[0]).toEqual({ juror: "TREND", impliedProbUp: 0.8, outcomeUp: 1 });
+  });
+
+  it("buildScoredBallots still drops abstains and unsettled decisions", () => {
+    const outcomeUpByDecision = new Map([["d1", 1]]);
+    const votes = [
+      { decisionId: "d1", juror: "TREND", vote: "ABSTAIN", confidence: 0.8, engine: "llm" },
+      { decisionId: "d_missing", juror: "SENTINEL", vote: "YES", confidence: 0.8, engine: "llm" },
+    ];
+    expect(buildScoredBallots(votes, outcomeUpByDecision)).toHaveLength(0);
   });
 });

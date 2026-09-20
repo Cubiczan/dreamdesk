@@ -80,6 +80,9 @@ model CouncilVote {
   vote       String // YES | NO | ABSTAIN  (YES = buy Up contract)
   confidence Float
   rationale  String
+  // "llm" | "heuristic" — which engine authored the ballot. Null for rows
+  // persisted before the label existed; calibration scores only "llm".
+  engine     String?
   createdAt  DateTime @default(now())
   session    Session  @relation(fields: [sessionId], references: [id])
   decision   Decision @relation(fields: [decisionId], references: [id])

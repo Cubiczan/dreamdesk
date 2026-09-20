@@ -202,7 +202,13 @@ prisma/schema.prisma              # 7 models — the audit trail's source of tru
   `src/lib/desk/council.ts` `conveneCouncil`). Quorum stays structural —
   weights tilt conviction, never vote counts — and with no settled history the
   weights are neutral 1.0, so calibration only shifts behavior once outcomes
-  exist.
+  exist. Scoring-input provenance (per review): only genuine LLM ballots feed
+  Brier scoring — `councilVote.engine` (persisted per ballot; null for rows
+  written before the label existed) is filtered by
+  `isScoreableEngine`/`buildScoredBallots` in `src/lib/desk/calibration.ts`,
+  so heuristic fallback votes and ambiguous pre-label rows never enter the
+  signal, while the audit log still records every ballot with its engine
+  label.
   Edge-gate interaction (explicit, per review): calibrated weights reach
   `modelProb` — the input compared against the venue price at the
   deterministic 8-cent edge gate — through `weightedNetConviction`

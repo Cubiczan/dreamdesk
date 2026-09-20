@@ -29,6 +29,49 @@ export const DEFAULT_MIN_WEIGHT = 0.6;
 export const DEFAULT_MAX_WEIGHT = 1.4;
 
 /**
+ * Only genuine LLM ballots may feed Brier scoring. Heuristic fallbacks are
+ * deterministic rule outputs, not the juror's probability estimate — the
+ * paper run's votes were 40% heuristic, so scoring them corrupts the signal
+ * in both directions (a good juror with a poor fallback is penalized; a rule
+ * that gets lucky is rewarded). Rows persisted before the engine label
+ * existed (null) fail closed: excluded.
+ */
+export function isScoreableEngine(engine: string | null | undefined): boolean {
+  return engine === "llm";
+}
+
+/**
+ * Join settled-outcome votes into scoreable records. Only genuine LLM
+ * ballots score (`isScoreableEngine`); heuristic/null-engine ballots,
+ * abstains, and votes without a settled outcome are dropped. Pure — the
+ * engine supplies the persisted join.
+ */
+export function buildScoredBallots(
+  votes: Array<{
+    decisionId: string;
+    juror: string;
+    vote: string;
+    confidence: number;
+    engine: string | null;
+  }>,
+  outcomeUpByDecision: ReadonlyMap<string, number>,
+): ScoredBallot[] {
+  const jurors: JurorName[] = ["TREND", "CONTRARIAN", "SENTINEL"];
+  const records: ScoredBallot[] = [];
+  for (const v of votes) {
+    const outcomeUp = outcomeUpByDecision.get(v.decisionId);
+    if (outcomeUp == null) continue;
+    const juror = jurors.find((j) => j === v.juror);
+    if (!juror) continue;
+    const impliedProbUp = impliedProbForUp(v.vote as "YES" | "NO" | "ABSTAIN", v.confidence);
+    if (impliedProbUp == null) continue;
+    if (!isScoreableEngine(v.engine)) continue;
+    records.push({ juror, impliedProbUp, outcomeUp });
+  }
+  return records;
+}
+
+/**
  * A YES ballot on the Up contract prices Up at `confidence`; a NO ballot
  * prices Up at `1 - confidence`; ABSTAIN carries no probability.
  */
