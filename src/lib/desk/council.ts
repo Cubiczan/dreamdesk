@@ -7,6 +7,7 @@
 
 import { type SignalPacket } from "./agents";
 import { startActiveObservation } from "@langfuse/tracing";
+import type { JurorWeights } from "./calibration";
 
 export type JurorName = "TREND" | "CONTRARIAN" | "SENTINEL";
 export type Vote = "YES" | "NO" | "ABSTAIN"; // YES = buy the Up contract
@@ -26,6 +27,19 @@ export type CouncilOutcome = {
   netConviction: number; // signed −1..1
   summary: string;
 };
+
+/**
+ * Weighted net conviction: calibrated juror weights tilt the signed vote
+ * balance without touching vote counts (quorum stays structural — README
+ * row 4). Pure so the modelProb path that feeds the 8-cent edge gate
+ * stays testable against prelint's vectors.
+ */
+export function weightedNetConviction(ballots: JurorBallot[], weights?: JurorWeights): number {
+  const yesWeight = ballots.filter((b) => b.vote === "YES").reduce((a, b) => a + b.confidence * (weights?.[b.juror] ?? 1), 0);
+  const noWeight = ballots.filter((b) => b.vote === "NO").reduce((a, b) => a + b.confidence * (weights?.[b.juror] ?? 1), 0);
+  const total = yesWeight + noWeight;
+  return total > 0 ? (yesWeight - noWeight) / Math.max(total, 0.001) : 0;
+}
 
 const JUROR_MANDATES: Record<JurorName, string> = {
   TREND: "You vote with momentum. You favor trades where the quant packet shows aligned directional pressure and penalize mixed readings. You would rather miss a reversal than fight a trend.",
@@ -145,7 +159,7 @@ async function voteJuror(juror: JurorName, ctx: CouncilContext): Promise<JurorBa
   }
 }
 
-export async function conveneCouncil(ctx: CouncilContext): Promise<CouncilOutcome> {
+export async function conveneCouncil(ctx: CouncilContext, weights?: JurorWeights): Promise<CouncilOutcome> {
   return await startActiveObservation("desk-council", async (span) => {
     span.update({ input: { asset: ctx.asset, cadenceSec: ctx.cadenceSec, marketSymbol: ctx.marketSymbol } });
 
@@ -155,17 +169,17 @@ export async function conveneCouncil(ctx: CouncilContext): Promise<CouncilOutcom
       voteJuror("SENTINEL", ctx),
     ]);
 
-    const yesWeight = ballots.filter((b) => b.vote === "YES").reduce((a, b) => a + b.confidence, 0);
-    const noWeight = ballots.filter((b) => b.vote === "NO").reduce((a, b) => a + b.confidence, 0);
-    const total = yesWeight + noWeight;
+    const netConviction = weightedNetConviction(ballots, weights);
 
     let consensus: CouncilOutcome["consensus"] = "SPLIT";
-    if (yesWeight > noWeight && ballots.filter((b) => b.vote === "YES").length >= 2) consensus = "UP";
-    else if (noWeight > yesWeight && ballots.filter((b) => b.vote === "NO").length >= 2) consensus = "DOWN";
+    if (netConviction > 0 && ballots.filter((b) => b.vote === "YES").length >= 2) consensus = "UP";
+    else if (netConviction < 0 && ballots.filter((b) => b.vote === "NO").length >= 2) consensus = "DOWN";
 
     // Implied model probability: venue mid anchored by weighted conviction.
+    // NOTE (row 4, documented in the README): this IS the edge-gate input —
+    // calibrated weights reach it via weightedNetConviction, so under the
+    // [0.6, 1.4] band a max-spread 2v1 split can move modelProb ~4 cents.
     const mid = ctx.upAsk != null && ctx.upBid != null ? (ctx.upAsk + ctx.upBid) / 2 : ctx.upAsk ?? 0.5;
-    const netConviction = total > 0 ? (yesWeight - noWeight) / Math.max(total, 0.001) : 0;
     const modelProb = Math.min(0.95, Math.max(0.05, mid + netConviction * 0.15));
 
     const yesCount = ballots.filter((b) => b.vote === "YES").length;

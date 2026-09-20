@@ -11,7 +11,8 @@ import { computeAuditHash, GENESIS_HASH } from "./ledger";
 import { DESK, CHP, DREAMDEX, chpLedgerPath, chpRequireHumanLock, resolveMode, type DeskMode } from "./config";
 import { prices } from "./prices";
 import { momentumAgent, volatilityAgent, sentimentAgent, type SignalPacket, type AgentName } from "./agents";
-import { conveneCouncil, type JurorBallot, type CouncilContext, type CouncilOutcome } from "./council";
+import { conveneCouncil, type JurorBallot, type CouncilContext, type CouncilOutcome, type JurorName } from "./council";
+import { buildScoredBallots, computeJurorWeights, type JurorWeights } from "./calibration";
 import { runRiskGates, type RiskGate } from "./risk";
 import {
   runChpTradeGate,
@@ -286,7 +287,11 @@ class DeskEngine extends EventEmitter {
         signals: [mom, vol, senti],
         recentForm,
       };
-      const outcome = await conveneCouncil(ctx);
+      const jurorWeights = await this.loadJurorWeights();
+      if (Object.keys(jurorWeights).length > 0) {
+        await this.audit("CONVENING", "COUNCIL", { calibratedJurorWeights: jurorWeights });
+      }
+      const outcome = await conveneCouncil(ctx, jurorWeights);
       this.stats.convenings += 1;
 
       // Record the verdict + ballots (decision id first, votes reference it directly).
@@ -307,7 +312,7 @@ class DeskEngine extends EventEmitter {
         },
       });
       for (const b of outcome.ballots) {
-        await db.councilVote.create({ data: { sessionId: this.sessionId!, decisionId: decision.id, juror: b.juror, vote: b.vote, confidence: b.confidence, rationale: b.rationale } });
+        await db.councilVote.create({ data: { sessionId: this.sessionId!, decisionId: decision.id, juror: b.juror, vote: b.vote, confidence: b.confidence, rationale: b.rationale, engine: b.engine } });
         await this.audit("VOTE", "COUNCIL", { juror: b.juror, vote: b.vote, confidence: Number(b.confidence.toFixed(2)), engine: b.engine, rationale: b.rationale });
       }
       await this.audit("CONSENSUS", "COUNCIL", { consensus: outcome.consensus, modelProb: Number(outcome.modelProb.toFixed(3)), summary: outcome.summary });
@@ -499,6 +504,42 @@ class DeskEngine extends EventEmitter {
   }
 
   /* ------------------------------ settlement ----------------------------- */
+
+  /**
+   * Row-4 calibration input (see src/lib/desk/calibration.ts): join settled
+   * trades' persisted `settleProb` outcomes with the council ballots that
+   * opened them, yielding per-juror Brier records. Returns {} before any
+   * settled history exists — the council then votes with neutral weights,
+   * exactly as it did before calibration was wired.
+   */
+  private async loadJurorWeights(): Promise<JurorWeights> {
+    if (!this.sessionId) return {};
+    const settled = await db.trade.findMany({
+      where: {
+        sessionId: this.sessionId,
+        decisionId: { not: null },
+        status: { in: ["SETTLED_WIN", "SETTLED_LOSS"] },
+        settleProb: { not: null },
+      },
+      orderBy: { settledAt: "desc" },
+      take: 200,
+      select: { decisionId: true, side: true, settleProb: true },
+    });
+    if (settled.length === 0) return {};
+
+    const decisionIds = settled.map((t) => t.decisionId as string);
+    const votes = await db.councilVote.findMany({
+      where: { decisionId: { in: decisionIds } },
+      select: { decisionId: true, juror: true, vote: true, confidence: true, engine: true },
+    });
+
+    const outcomeUpByDecision = new Map<string, number>();
+    for (const t of settled) {
+      const up = t.side === "YES" ? (t.settleProb as number) : 1 - (t.settleProb as number);
+      outcomeUpByDecision.set(t.decisionId as string, up);
+    }
+    return computeJurorWeights(buildScoredBallots(votes, outcomeUpByDecision));
+  }
 
   private async settleExpired() {
     if (!this.sessionId || this.openTrades.length === 0) return;

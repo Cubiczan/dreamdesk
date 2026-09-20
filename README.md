@@ -190,3 +190,49 @@ prisma/schema.prisma              # 7 models — the audit trail's source of tru
 ## Team
 
 [@icohangar-ops](https://github.com/icohangar-ops) · [@Cubiczan](https://github.com/Cubiczan)
+
+## Propagation notes (wave B)
+
+- **Row 4 (calibration feedback loop) — adopted.** `src/lib/desk/calibration.ts`
+  implements per-juror Brier scoring against settled trade outcomes: each
+  ballot's confidence is read as the juror's implied probability of the UP
+  outcome (`impliedProbForUp`), scored against the persisted `settleProb` of
+  the trade that decision opened, and softmax'd into per-juror weights bounded
+  to [0.6, 1.4] (`src/lib/desk/engine.ts` `loadJurorWeights`, applied in
+  `src/lib/desk/council.ts` `conveneCouncil`). Quorum stays structural —
+  weights tilt conviction, never vote counts — and with no settled history the
+  weights are neutral 1.0, so calibration only shifts behavior once outcomes
+  exist. Scoring-input provenance (per review): only genuine LLM ballots feed
+  Brier scoring — `councilVote.engine` (persisted per ballot; null for rows
+  written before the label existed) is filtered by
+  `isScoreableEngine`/`buildScoredBallots` in `src/lib/desk/calibration.ts`,
+  so heuristic fallback votes and ambiguous pre-label rows never enter the
+  signal, while the audit log still records every ballot with its engine
+  label.
+  Edge-gate interaction (explicit, per review): calibrated weights reach
+  `modelProb` — the input compared against the venue price at the
+  deterministic 8-cent edge gate — through `weightedNetConviction`
+  (`src/lib/desk/council.ts`; the net-conviction call site and `modelProb`
+  construction sit at lines 172-183 at this writing). Under the [0.6, 1.4]
+  bound the shift is bounded: a max-spread 2v1 split moves `modelProb` by
+  about 4 cents (exactly 0.04 on the pinned prelint vector — TREND 1.4 YES /
+  SENTINEL 1.0 YES / CONTRARIAN 0.6 NO at 0.8 confidence — and below a
+  nickel in the worst case; both asserted in `tests/calibration.test.ts`).
+  That means in max-spread 2v1 splits calibration can push a previously
+  sub-threshold edge past the 8-cent gate — by design once settled outcomes
+  exist. Reopening condition (matrix): outcomes rare, slow, or subjective.
+- **Row 11 (on-chain identity + off-chain blob state) — reversed.** DreamDesk
+  executes on Somnia testnet, not Sui; the Walrus SDK state-pointer port is
+  heavy for a non-Sui stack. The row's own reversal condition also fires:
+  audits are already verifiable per decision through DreamDesk's own Audit
+  Ledger (`src/lib/desk/ledger.ts` — a per-event SHA-256 hash chain,
+  `prevHash|seq|kind|actor|payload|timestamp`, verified on demand by
+  `verifyChain()` at `/api/desk/audit` with a live intact/broken badge) plus
+  persisted `CouncilVote`/`Trade` records — not the CHP adapter
+  (`chp-ledger.ts`), which is a separate integration surface — so a
+  session-level blob pointer would trade per-event verifiability for cost.
+  Reopens if any of the row's settled paths arrive: the desk migrates to a
+  Sui-family venue (direct Walrus port); it gains a blob layer on the
+  current stack (IPFS or a Walrus-on-other-VM equivalent, per the review's
+  porting note); or audits move to session granularity, where the
+  per-event-verifiability condition no longer holds.
