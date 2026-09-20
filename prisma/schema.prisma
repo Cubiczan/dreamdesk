@@ -43,7 +43,7 @@ model Decision {
   expiry       Int? // unix seconds
   entryProb    Float? // Up probability at entry
   chosenSide   String? // YES (Up) | NO (Down)
-  status       String // CONVENED | TRADED | NO_QUORUM | VETOED | EXEC_FAILED | HELD
+  status       String // CONVENED | TRADED | NO_QUORUM | VETOED | EXEC_FAILED | HELD | CHP_REFUSED (R0/foundation/Profile B/human-lock refusal)
   consensus    String? // UP | DOWN | SPLIT
   summary      String
   signals      String // JSON snapshot of agent signals

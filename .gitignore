@@ -54,6 +54,9 @@ server.log
 /skills/tool-results/
 download/
 
+# CHP trade decision ledger (append-only JSONL state tree)
+state/
+
 # scratch + scaffold internals
 tool-results/
 download/

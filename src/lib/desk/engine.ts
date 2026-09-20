@@ -5,18 +5,30 @@
 // a hash-chained audit event for every step, and broadcasting UI snapshots.
 
 import { EventEmitter } from "events";
+import { createHash } from "crypto";
 import { db } from "@/lib/db";
 import { computeAuditHash, GENESIS_HASH } from "./ledger";
-import { DESK, DREAMDEX, resolveMode, type DeskMode } from "./config";
+import { DESK, CHP, DREAMDEX, chpLedgerPath, chpRequireHumanLock, resolveMode, type DeskMode } from "./config";
 import { prices } from "./prices";
 import { momentumAgent, volatilityAgent, sentimentAgent, type SignalPacket, type AgentName } from "./agents";
-import { conveneCouncil, type JurorBallot, type CouncilContext } from "./council";
+import { conveneCouncil, type JurorBallot, type CouncilContext, type CouncilOutcome } from "./council";
 import { runRiskGates, type RiskGate } from "./risk";
+import {
+  runChpTradeGate,
+  chpPolicy,
+  chpBody,
+  buildPayloadEnvelope,
+  renderPayloadEnvelope,
+  SessionLock,
+  type SessionLockState,
+  type ChpTradeGateResult,
+} from "./chp";
+import { ChpTradeLedger } from "./chp-ledger";
 import { PaperAdapter, LiveAdapter, type ExecutionAdapter, priceForSide } from "./adapters";
 import { findMarket, fetchUpQuote, getExchange, getAnyExchange, walletAddress, collateralBalance, type MarketCandidate, type BookQuote } from "./exchange";
 import type { Tick } from "./indicators";
 
-export type Phase = "idle" | "gathering" | "convening" | "risk" | "executing" | "settling" | "cooldown";
+export type Phase = "idle" | "gathering" | "convening" | "risk" | "chp" | "executing" | "settling" | "cooldown";
 export type DecisionView = {
   id: string;
   cycle: number;
@@ -79,6 +91,7 @@ export type Snapshot = {
   auditCount: number;
   chainOk: boolean;
   oracleHealthy: boolean;
+  chp: { lockState: SessionLockState; confirmedBy: string | null; requireHumanLock: boolean };
   lastError: string | null;
   at: string;
 };
@@ -124,6 +137,9 @@ class DeskEngine extends EventEmitter {
   private adapter: ExecutionAdapter = new PaperAdapter();
   private activeMarket: MarketCandidate | null = null;
   private lastQuote: BookQuote | null = null;
+  // CHP gate-only layer: every session starts EXPLORING; the trade decision
+  // ledger is opened lazily (its path is env-resolvable per call).
+  chpLock = new SessionLock();
   lastError: string | null = null;
 
   /* ------------------------------ lifecycle ------------------------------ */
@@ -143,6 +159,7 @@ class DeskEngine extends EventEmitter {
     this.prevHash = GENESIS_HASH;
     this.auditTail = [];
     this.auditCount = 0;
+    this.chpLock = new SessionLock(); // sessions start EXPLORING — fail-closed for LIVE capital
     this.agentPackets = { MOMENTUM: EMPTY_PACKET("MOMENTUM"), VOLATILITY: EMPTY_PACKET("VOLATILITY"), SENTIMENT: EMPTY_PACKET("SENTIMENT") };
     this.decision = null;
     this.openTrades = [];
@@ -173,7 +190,7 @@ class DeskEngine extends EventEmitter {
     prices.ensurePolling(["BTC", "ETH"]);
     await this.audit("SESSION_START", "ENGINE", {
       mode: this.mode, asset: this.asset, cadenceSec: this.cadenceSec, adapter: this.adapter.name,
-      wallet: this.wallet, reason: this.modeReason,
+      wallet: this.wallet, reason: this.modeReason, chp_lock: this.chpLock.state,
     });
     this.timer = setInterval(() => void this.tickCycle(), DESK.cycleIntervalMs);
     this.broadcast();
@@ -345,6 +362,7 @@ class DeskEngine extends EventEmitter {
       let execDetail: string | null = null;
       let txHash: string | null = null;
       let entryProb: number | null = null;
+      let chpRefused = false;
 
       if (outcome.consensus === "SPLIT") {
         await db.decision.update({ where: { id: decision.id }, data: { status: "NO_QUORUM" } });
@@ -353,10 +371,46 @@ class DeskEngine extends EventEmitter {
         await db.decision.update({ where: { id: decision.id }, data: { status: "VETOED" } });
         execDetail = `Risk governor vetoed: ${gatesResult.gates.filter((g) => !g.passed).map((g) => g.gate).join(", ")}`;
       } else {
-        // 5 — EXECUTE.
-        this.phase = "executing";
+        // 5 — CHP GATE: R0 → foundation → Profile B → human lock. A HALT here
+        // refuses the trade with nothing executed — the executor never sees it.
+        this.phase = "chp";
         this.broadcast();
         const notional = this.mode === "LIVE" ? Math.max(1, (this.collateral ?? 0) * DESK.perTradeEquityShare) : this.equity * DESK.perTradeEquityShare;
+        const chpResult = runChpTradeGate({
+          decisionId: decision.id,
+          asset: this.asset,
+          side,
+          modelProb: outcome.modelProb,
+          signedEdge,
+          notional,
+          equity: this.equity,
+          quote: this.lastQuote ? { bestBid: this.lastQuote.bestBid, bestAsk: this.lastQuote.bestAsk } : null,
+          riskGates: gatesResult.gates,
+          councilConfidence: winningConfidence,
+          mode: this.mode,
+          lock: this.chpLock.state,
+          committedToday: await this.ledger().committedToday(),
+          requireHumanLock: chpRequireHumanLock(),
+          policy: chpPolicy(),
+        });
+        await this.audit("CHP", "CHP", {
+          stage: chpResult.stage, allowed: chpResult.allowed, reason: chpResult.reason,
+          r0: chpResult.r0.results,
+          foundation_score: chpResult.foundation?.score ?? null,
+          foundation_verdict: chpResult.foundation?.verdict ?? null,
+          parity_source: chpResult.foundation?.parity?.source ?? null,
+          profile_b: chpResult.profileB?.state ?? null,
+          lock_state: this.chpLock.state,
+          notional: Number(notional.toFixed(2)),
+        });
+        if (!chpResult.allowed) {
+          chpRefused = true;
+          await db.decision.update({ where: { id: decision.id }, data: { status: "CHP_REFUSED" } });
+          execDetail = `CHP ${chpResult.stage} refusal — ${chpResult.reason}`;
+        } else {
+        // 6 — EXECUTE.
+        this.phase = "executing";
+        this.broadcast();
         const result = await this.adapter.execute({
           symbol: this.activeMarket!.upSymbol,
           side,
@@ -395,6 +449,10 @@ class DeskEngine extends EventEmitter {
         } else {
           await db.decision.update({ where: { id: decision.id }, data: { status: "HELD" } });
         }
+
+        // Seal the gate-approved decision into the append-only trade ledger.
+        await this.recordChpDecision(decision.id, outcome, chpResult, side, notional, result);
+        }
       }
 
       await db.riskCheck.createMany({
@@ -407,7 +465,7 @@ class DeskEngine extends EventEmitter {
 
       this.decision = {
         id: decision.id, cycle: this.cycle,
-        status: outcome.consensus === "SPLIT" ? "NO_QUORUM" : gatesResult.pass ? (entryProb != null ? "TRADED" : "HELD") : "VETOED",
+        status: outcome.consensus === "SPLIT" ? "NO_QUORUM" : !gatesResult.pass ? "VETOED" : chpRefused ? "CHP_REFUSED" : entryProb != null ? "TRADED" : "HELD",
         consensus: outcome.consensus, summary: outcome.summary, chosenSide: outcome.consensus === "SPLIT" ? null : side,
         entryProb, marketSymbol: this.activeMarket ? this.activeMarket.upSymbol.split("#")[0] : null,
         secondsLeft: this.activeMarket?.secondsLeft ?? null,
@@ -536,6 +594,104 @@ class DeskEngine extends EventEmitter {
     this.equity = this.mode === "LIVE" ? (this.collateral ?? 0) + this.realizedPnl + unrealized : this.startingEquity + this.realizedPnl + unrealized;
   }
 
+  /* --------------------------------- CHP ---------------------------------- */
+
+  /** Trade decision ledger at the env-resolvable path (re-opened per use). */
+  private ledger(): ChpTradeLedger {
+    return new ChpTradeLedger(chpLedgerPath());
+  }
+
+  /** Seal a gate-approved trade decision into the CHP ledger (envelope + own SHA-256 body digest). */
+  private async recordChpDecision(
+    decisionId: string,
+    outcome: CouncilOutcome,
+    chp: ChpTradeGateResult,
+    side: "YES" | "NO",
+    notional: number,
+    result: { price: number; size: number; filled: boolean; txHash: string | null; detail: string; notional: number },
+  ) {
+    const body = chpBody({
+      decision_id: decisionId,
+      asset: this.asset,
+      side,
+      model_prob: Number(outcome.modelProb.toFixed(6)),
+      r0_verdict: chp.r0.verdict,
+      r0_results: chp.r0.results,
+      foundation_verdict: chp.foundation?.verdict ?? null,
+      foundation_score: chp.foundation?.score ?? null,
+      parity: chp.foundation?.parity ?? null,
+      profile_b_state: chp.profileB?.state ?? null,
+      mode: this.mode,
+      lock_state: this.chpLock.state,
+      confirmed_by: this.chpLock.confirmedBy,
+      notional: Number(notional.toFixed(6)),
+    });
+    const envelope = buildPayloadEnvelope(body, "TRADE");
+    await this.ledger().append({
+      decision_id: decisionId,
+      payload_id: envelope.payload_id,
+      created_at: new Date().toISOString(),
+      session_id: this.sessionId,
+      cycle: this.cycle,
+      asset: this.asset,
+      domain: CHP.foundationDomain,
+      mode: this.mode,
+      session_status: this.chpLock.state,
+      r0_verdict: chp.r0.verdict,
+      r0_results: chp.r0.results,
+      foundation_verdict: chp.foundation?.verdict ?? "REFRAME",
+      foundation_score: chp.foundation?.score ?? 0,
+      parity: chp.foundation?.parity ?? null,
+      profile_b: chp.profileB
+        ? { state: chp.profileB.state, reason: chp.profileB.reason, content_hash: chp.profileB.content_hash }
+        : null,
+      lock_validation: this.chpLock.lastValidation(),
+      confirmed_by: this.chpLock.confirmedBy,
+      execution: {
+        side,
+        notional: Number(result.notional.toFixed(6)),
+        price: result.price,
+        size: result.size,
+        filled: result.filled,
+        txHash: result.txHash,
+        detail: result.detail,
+      },
+      body,
+      body_sha256: createHash("sha256").update(body, "utf8").digest("hex"),
+      envelope: renderPayloadEnvelope(envelope),
+    });
+    await this.audit("CHP", "CHP", { event: "decision_record", decision_id: decisionId, payload_id: envelope.payload_id });
+  }
+
+  /* ---------------------------- CHP human lock ---------------------------- */
+
+  chpStateView(): { lockState: SessionLockState; confirmedBy: string | null; requireHumanLock: boolean } {
+    return { lockState: this.chpLock.state, confirmedBy: this.chpLock.confirmedBy, requireHumanLock: chpRequireHumanLock() };
+  }
+
+  /** Explicit EXPLORING → PROVISIONAL_LOCK transition (precondition for third-party validation). */
+  async chpOpenProvisional() {
+    const t = this.chpLock.openProvisional();
+    await this.audit("CHP", "CHP", {
+      event: "lock_transition", ok: t.ok, state: t.state,
+      detail: t.ok ? "session opened PROVISIONAL_LOCK" : t.detail,
+    });
+    this.broadcast();
+    return t;
+  }
+
+  /** Third-party validation: PROVISIONAL_LOCK → LOCKED with a named confirmer. */
+  async chpConfirm(confirmedBy: string) {
+    const t = this.chpLock.confirm(confirmedBy, this.sessionId ?? "no-session");
+    await this.audit("CHP", "CHP", {
+      event: "third_party_validation", ok: t.ok, state: t.state,
+      validation: t.ok ? t.validation : null,
+      detail: t.ok ? `session LOCKED by ${t.validation?.validator}` : t.detail,
+    });
+    this.broadcast();
+    return t;
+  }
+
   /* ------------------------------ audit trail ---------------------------- */
 
   private async audit(kind: string, actor: string, payload: unknown) {
@@ -584,6 +740,7 @@ class DeskEngine extends EventEmitter {
       auditCount: this.auditCount,
       chainOk: this.chainOk,
       oracleHealthy: prices.oracleHealthy,
+      chp: this.chpStateView(),
       lastError: this.lastError,
       at: new Date().toISOString(),
     };

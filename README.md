@@ -66,6 +66,20 @@ Additional guardrails: max 3 concurrent positions, 20s cooldown between executio
 
 **Dual-mode execution.** With a funded wallet key configured the desk trades LIVE on Somnia Shannon (chainId `50312`), signing real IOC limit orders and auto-redeeming wins. Without a key it runs an isomorphic PAPER desk — same signals, same council, same gates — filling at live venue prices with a +1¢ slippage model. The mode badge and the audit ledger always tell you which world you're in.
 
+## Consensus Hardening Protocol (CHP)
+
+Before the desk ever moves capital, a gate-only port of the **Consensus Hardening Protocol** (the pattern proven in `erp-control-plane`'s GenBI promotion gate) audits every consequential trade decision:
+
+1. **R0 gate** — "is this trade solvable from the current portfolio state?" Four capitalized criteria (`Solvable`, `Scoped`, `Valid`, `Worth_it`); any failure reports **FATAL** and halts with nothing executed.
+2. **Profile B capital gate** — via the published [`@cubiczan/chp`](https://www.npmjs.com/package/@cubiczan/chp) package: per-trade notional cap, daily cap, and a human-in-the-loop threshold — any trade at or above it is refused outright, because a desk cannot countersign itself.
+3. **Deterministic adversary foundation pass** — a pure-function adversary scores the guardrailed decision 0–100: guardrails 40 + bounded order 30 + parity 30. The decision's claims are reconciled against recomputed portfolio/market state; where no independent recomputation is possible (no venue book), the assertions stand as *unverified* parity evidence and earn nothing. DeFi gates at **85** — a decision without verifiable evidence cannot self-certify.
+4. **Human lock** — sessions start `EXPLORING`. LIVE execution requires an explicit `PROVISIONAL_LOCK` transition followed by a named confirmer (`confirmed_by`) that locks the session. `DREAMDESK_CHP_REQUIRE_HUMAN_LOCK` defaults ON; PAPER exploration is exempt.
+5. **Trade decision ledger** — every gate-approved execution is sealed to an append-only JSONL ledger (`state/chp-decisions.jsonl`): the decision body inside a CHP payload envelope **plus** its own SHA-256 body digest, both re-validated on every read (`envelope_valid`, `integrity_valid`). The envelope validator is structure-only — it never proves content integrity, which is exactly why the ledger carries its own digest.
+
+Every refusal sets the decision status `CHP_REFUSED` with the failing stage in the audit trail — the executor never sees a refused trade.
+
+**Env knobs:** `DREAMDESK_CHP_REQUIRE_HUMAN_LOCK` (default ON), `DREAMDESK_CHP_LEDGER_PATH`, `CHP_MAX_NOTIONAL` (500), `CHP_DAILY_CAP` (2500), `CHP_HITL_THRESHOLD` (250).
+
 ## Getting started
 
 ```bash
@@ -124,6 +138,7 @@ A narrated walkthrough — the pipeline, the council, the gates, and the hash-ch
 | `/api/desk/uipath` | POST | Accept a UiPath handoff and start/advance the desk |
 | `/api/desk/faucet` | POST | Claim tUSDC from the dreamDEX testnet faucet (LIVE mode) |
 | `/api/desk/audit` | GET | Full audit ledger + `verifyChain()` result |
+| `/api/desk/chp` | GET/POST | CHP gate state + trade decision ledger; POST `{ action: "open_provisional" \| "confirm", confirmed_by }` |
 | `/api/desk/stream` | GET | SSE stream of desk snapshots (real-time UI) |
 
 ## Tech stack
@@ -155,7 +170,10 @@ src/
     ├── prices.ts                 # dual-feed price manager (oracle + Binance fallback)
     ├── indicators.ts             # EMA, ROC, stdev, RSI, z-score
     ├── ledger.ts                 # SHA-256 hash-chained audit log + verifier
+    ├── chp.ts                    # CHP gate-only pass: R0 → risk gates → Profile B → foundation → human lock
+    ├── chp-ledger.ts             # append-only trade decision ledger (envelope + SHA-256 body integrity)
     └── config.ts                 # desk knobs + LIVE/PAPER resolution
+tests/                            # vitest — CHP gate suite + trading-loop integration
 prisma/schema.prisma              # 7 models — the audit trail's source of truth
 ```
 
@@ -165,6 +183,9 @@ prisma/schema.prisma              # 7 models — the audit trail's source of tru
 - The sentiment agent caches its LLM read for 10 minutes; a fast-moving tape can outdate it between caches.
 - PAPER fills assume +1¢ slippage against live venue prices — a simplification, but a conservative one.
 - The heuristic juror fallback keeps the desk alive during LLM outages, but votes are labeled `heuristic` in the UI so no one mistakes them for model reasoning.
+- The CHP session lock lives in memory: a process restart returns a LIVE session to `EXPLORING` — the fail-closed direction (capital re-locks), but a named confirmer must re-confirm.
+- The CHP human lock is env-controlled and deliberately fail-open only when explicitly disabled: `DREAMDESK_CHP_REQUIRE_HUMAN_LOCK=0` lets LIVE trades run without a lock (for CI and demos); the flag state is written into every ledger record.
+- Trade parity has no golden QA source: the deterministic adversary reconciles decisions against recomputed portfolio/market state, and when no venue book exists the assertions stand as *unverified* evidence that score nothing — a decision in that state cannot self-certify.
 
 ## Team
 

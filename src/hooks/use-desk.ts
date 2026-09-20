@@ -38,6 +38,7 @@ const EMPTY: DeskSnapshot = {
   },
   decision: null,
   openTrades: [],
+  chp: { lockState: "EXPLORING", confirmedBy: null, requireHumanLock: true },
   settledTrades: [],
   stats: { trades: 0, wins: 0, losses: 0, winRate: 0, cycles: 0, convenings: 0 },
   auditTail: [],
