@@ -217,8 +217,16 @@ prisma/schema.prisma              # 7 models — the audit trail's source of tru
   exist. Reopening condition (matrix): outcomes rare, slow, or subjective.
 - **Row 11 (on-chain identity + off-chain blob state) — reversed.** DreamDesk
   executes on Somnia testnet, not Sui; the Walrus SDK state-pointer port is
-  heavy for a non-Sui stack. The reversal condition also fires: audits are
-  already verifiable per decision through the hash-chained CHP ledger and
-  persisted `CouncilVote`/`Trade` records, so a session-level blob pointer
-  would trade per-event verifiability for cost. Reopens if the desk migrates
-  to a Sui-family venue or gains permanent-storage sealing.
+  heavy for a non-Sui stack. The row's own reversal condition also fires:
+  audits are already verifiable per decision through DreamDesk's own Audit
+  Ledger (`src/lib/desk/ledger.ts` — a per-event SHA-256 hash chain,
+  `prevHash|seq|kind|actor|payload|timestamp`, verified on demand by
+  `verifyChain()` at `/api/desk/audit` with a live intact/broken badge) plus
+  persisted `CouncilVote`/`Trade` records — not the CHP adapter
+  (`chp-ledger.ts`), which is a separate integration surface — so a
+  session-level blob pointer would trade per-event verifiability for cost.
+  Reopens if any of the row's settled paths arrive: the desk migrates to a
+  Sui-family venue (direct Walrus port); it gains a blob layer on the
+  current stack (IPFS or a Walrus-on-other-VM equivalent, per the review's
+  porting note); or audits move to session granularity, where the
+  per-event-verifiability condition no longer holds.
