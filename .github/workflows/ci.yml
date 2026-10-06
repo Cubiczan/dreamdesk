@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: install, test, build
+    runs-on: ubuntu-latest
+    env:
+      # Prisma schema reads DATABASE_URL at generate time. SQLite file is not created;
+      # tests and the Next build do not open a connection.
+      DATABASE_URL: file:./db/custom.db
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
