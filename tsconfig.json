@@ -12,6 +12,8 @@
     "noEmit": true,
     "noImplicitAny": false,
     "esModuleInterop": true,
+    // scripts/test-timing-safe.ts imports a .ts path so Node's type stripper can resolve it.
+    "allowImportingTsExtensions": true,
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,

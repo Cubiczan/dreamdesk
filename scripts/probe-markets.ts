@@ -15,28 +15,28 @@ async function main() {
   console.log(`LIVE BINARY MARKETS: ${live.length}`);
   for (const m of live.slice(0, 12)) {
     const secsLeft = Number(m.expiry) - now;
-    const up = m.outcomes?.[0]?.symbol;
-    const down = m.outcomes?.[1]?.symbol;
+    // BinaryMarket exposes ERC-6909 position ids, not a unified `outcomes` list.
     console.log(JSON.stringify({
       marketId: String(m.marketId).slice(0, 12) + "…",
       asset: m.asset,
       intervalSec: Number(m.intervalSec),
       minsLeft: Math.round(secsLeft / 60),
       expiry: Number(m.expiry),
-      upSymbol: up,
-      downSymbol: down,
+      yesTokenId: m.yesTokenId,
+      noTokenId: m.noTokenId,
       lastPrice: m.lastPrice ? Number(m.lastPrice) / 1e6 : null,
       tradeCount: Number(m.tradeCount ?? 0),
     }));
   }
 
-  // Probe price feed
+  // Probe price feed. watchPrice only returns a stop handle; the price is read
+  // from the client's live store once the snapshot has landed.
   try {
     const h = await exchange.client.watchPrice("BTC");
     await new Promise(r => setTimeout(r, 3000));
-    const p = h.get();
+    const p = exchange.client.getLivePrice("BTC");
     console.log("BTC ORACLE PRICE:", p ? JSON.stringify(p).slice(0, 300) : "none yet");
-    await h.close?.();
+    h.stop();
   } catch (e: unknown) {
     console.log("watchPrice error:", (e as Error).message);
   }
